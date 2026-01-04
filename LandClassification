@@ -1,0 +1,186 @@
+// Load Dhamtari district boundaries
+var dhamtari = ee.FeatureCollection("FAO/GAUL/2015/level2")
+  .filter(ee.Filter.and(
+    ee.Filter.eq('ADM1_NAME', 'Chhattisgarh'),
+    ee.Filter.eq('ADM2_NAME', 'Dhamtari')
+  ));
+var dhamtariGeometry = dhamtari.geometry();
+
+// Get MODIS projection info
+var modisProjection = ee.Projection('SR-ORG:6974');
+
+// Solution 1: Reproject the geometry to MODIS projection
+var dhamtariModisProj = dhamtariGeometry.transform(modisProjection, 500);
+
+// Load and pre-process MODIS data (2014-2024)
+var modis = ee.ImageCollection('MODIS/006/MOD13Q1')
+  .filterBounds(dhamtariModisProj)  // Use reprojected geometry for filtering
+  .filterDate('2014-01-01', '2024-01-01')
+  .select(['NDVI', 'EVI', 'DetailedQA']);
+
+// Function to scale, mask, reproject and CLIP MODIS data
+var processModis = function(image) {
+  // Scale NDVI/EVI and apply QA masking
+  var scaled = image.select(['NDVI', 'EVI']).multiply(0.0001);
+  var qa = image.select('DetailedQA');
+  var mask = qa.bitwiseAnd(1).eq(0); // Use only best quality pixels
+  
+  // Reproject to WGS84 and CLIP to district boundary
+  return scaled
+    .updateMask(mask)
+    .reproject('EPSG:4326', null, 250)
+    .clip(dhamtariGeometry)  // THIS IS THE CRUCIAL ADDITION
+    .copyProperties(image, ['system:time_start']);
+};
+
+var modisProcessed = modis.map(processModis);
+
+////////////////////////////////////////////////////////////////////////////////
+
+// 1. Time Series Chart (works with WGS84)
+var tsChart = ui.Chart.image.series({
+  imageCollection: modisProcessed.select(['NDVI', 'EVI']),
+  region: dhamtariGeometry,  // Use original geometry for chart
+  reducer: ee.Reducer.mean(),
+  scale: 250,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: 'Dhamtari District: 10-Year Vegetation Trends (2014-2024)',
+  vAxis: {title: 'Index Value', viewWindow: {min: 0, max: 1}},
+  hAxis: {title: 'Year', format: 'YYYY'},
+  series: {
+    0: {color: '#2E8B57', lineWidth: 2}, // NDVI
+    1: {color: '#CD5C5C', lineWidth: 2}  // EVI
+  },
+  interpolateNulls: true
+});
+print(tsChart);
+
+// 2. Quarterly Analysis (using reprojected data)
+var quarterlyComposites = ee.List.sequence(2014, 2023).map(function(year) {
+  return ee.List.sequence(1, 4).map(function(quarter) {
+    var start = ee.Date.fromYMD(year, ee.Number(quarter).subtract(1).multiply(3).add(1), 1);
+    var end = start.advance(3, 'month');
+    
+    return modisProcessed
+      .filterDate(start, end)
+      .select('NDVI')
+      .mean()
+      .set({
+        'year': year,
+        'quarter': quarter,
+        'system:time_start': start.millis()
+      });
+  });
+}).flatten();
+
+print('Quarterly NDVI Composites', ee.ImageCollection(quarterlyComposites));
+
+// 3. Annual Trends
+var annualTrends = ee.List.sequence(2014, 2023).map(function(year) {
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end = start.advance(1, 'year');
+  
+  return modisProcessed
+    .filterDate(start, end)
+    .select(['NDVI', 'EVI'])
+    .mean()
+    .set({
+      'year': year,
+      'system:time_start': start.millis()
+    });
+});
+
+print('Annual Trends Data', ee.ImageCollection(annualTrends));
+
+/////////////////////////////////////////////////////////////////////
+// 4. Visualization Parameters
+// Visualization Parameters
+var visParams = {
+  min: 0,
+  max: 1,
+  palette: ['red', 'yellow', 'green']
+};
+//////////////////////////////////////////////////////////////////////
+// Visualize quarterly NDVI patterns
+var quarterlyVis = {
+  min: 0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'darkgreen']
+};
+
+// Add one quarter's composite to map (e.g., Q1 2014)
+var q1_2014 = ee.ImageCollection(quarterlyComposites)
+  .filter(ee.Filter.and(
+    ee.Filter.eq('year', 2014),
+    ee.Filter.eq('quarter', 1)
+  )).first();
+
+Map.addLayer(q1_2014, quarterlyVis, 'Q1 2014 NDVI');
+
+// Calculate seasonal amplitude (Q3 max - Q1 min)
+var q3 = ee.ImageCollection(quarterlyComposites)
+  .filter(ee.Filter.eq('quarter', 3))
+  .select('NDVI')
+  .max();
+
+var q1 = ee.ImageCollection(quarterlyComposites)
+  .filter(ee.Filter.eq('quarter', 1))
+  .select('NDVI')
+  .min();
+
+var seasonalAmplitude = q3.subtract(q1);
+Map.addLayer(seasonalAmplitude, 
+  {min: 0, max: 0.5, palette: ['blue', 'yellow', 'red']}, 
+  'Seasonal Amplitude');
+  // Convert annual trends to chart
+var annualChart = ui.Chart.image.series({
+  imageCollection: ee.ImageCollection(annualTrends),
+  region: dhamtariGeometry,
+  reducer: ee.Reducer.mean(),
+  scale: 250
+}).setOptions({
+  title: 'Annual NDVI Trends',
+  trendlines: {0: {showR2: true, visibleInLegend: true}}
+});
+print(annualChart);
+
+// Calculate decadal change (2023 vs 2014)
+var ndvi2014 = ee.ImageCollection(annualTrends)
+  .filter(ee.Filter.eq('year', 2014))
+  .first()
+  .select('NDVI');
+
+var ndvi2023 = ee.ImageCollection(annualTrends)
+  .filter(ee.Filter.eq('year', 2023))
+  .first()
+  .select('NDVI');
+
+var decadalChange = ndvi2023.subtract(ndvi2014);
+Map.addLayer(decadalChange, 
+  {min: -0.3, max: 0.3, palette: ['red', 'white', 'green']}, 
+  '2014-2023 NDVI Change');
+  
+  // Identify areas with consistent growing seasons
+var stableCropland = ee.ImageCollection(quarterlyComposites)
+  .filter(ee.Filter.rangeContains('quarter', 2, 3)) // Q2-Q3
+  .select('NDVI')
+  .mean()
+  .gt(0.6); // Threshold for active vegetation
+
+Map.addLayer(stableCropland.selfMask(), 
+  {palette: ['green']}, 
+  'Potential Cropland Areas');
+  
+/////////////// 
+////////////////////////////////////////////////////////////////////////////////
+// Create median composite (now properly clipped)
+var medianComposite = modisProcessed
+  .select('NDVI')
+  .median();
+
+Map.centerObject(dhamtariGeometry, 9);
+Map.addLayer(medianComposite, visParams, 'NDVI 10-Year Median - Dhamtari Only');
+Map.addLayer(dhamtariGeometry, {color: 'blue'}, 'District Boundary');
+
+print('Note: NDVI and EVI values have been scaled by 0.0001 to get actual index values');

@@ -1,0 +1,91 @@
+var dhamtari = ee.FeatureCollection("FAO/GAUL/2015/level2")
+  .filter(ee.Filter.and(
+    ee.Filter.eq('ADM1_NAME', 'Chhattisgarh'),
+    ee.Filter.eq('ADM2_NAME', 'Dhamtari')
+  ));
+var dhamtariGeometry = dhamtari.geometry();
+
+
+
+// Load MODIS NDVI/EVI data (2014-2024)
+var modis = ee.ImageCollection('MODIS/006/MOD13Q1')
+  .filterBounds(dhamtariGeometry)
+  .filterDate('2014-01-01', '2024-12-31');
+  
+  
+
+
+// Function to scale NDVI/EVI values according to MODIS documentation
+var scaleModis = function(image) {
+  return image.multiply(0.0001).copyProperties(image, ['system:time_start']);
+};
+var modisScaled = modis.map(scaleModis);
+
+
+// Load and process MODIS data with proper projection handling
+var modis = ee.ImageCollection('MODIS/006/MOD13Q1')
+  .filterBounds(dhamtariGeometry)
+  .filterDate('2014-01-01', '2024-01-01')
+  .select(['NDVI', 'EVI']);
+
+// Scale and reproject the MODIS data
+var modisScaled = modis.map(function(image) {
+  // Apply scale factor (0.0001 for MODIS indices)
+  var scaled = image.multiply(0.0001);
+  
+  // Reproject to WGS84 before clipping
+  var reprojected = scaled.reproject('EPSG:4326', null, 250);
+  
+  // Return with original date property
+  return reprojected.set('system:time_start', image.get('system:time_start'));
+});
+
+// Create time series chart with enhanced styling
+var chart = ui.Chart.image.series({
+  imageCollection: modisScaled,
+  region: dhamtariGeometry,
+  reducer: ee.Reducer.mean(),
+  scale: 250,
+  xProperty: 'system:time_start'
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Dhamtari District: MODIS NDVI/EVI Time Series (2014-2024)',
+  titleTextStyle: {fontSize: 16, fontWeight: 'bold'},
+  vAxis: {
+    title: 'Vegetation Index Value',
+    titleTextStyle: {italic: false, fontWeight: 'bold'},
+    viewWindow: {min: 0, max: 1}
+  },
+  hAxis: {
+    title: 'Date',
+    titleTextStyle: {italic: false, fontWeight: 'bold'},
+    format: 'YYYY-MM'
+  },
+  series: {
+    0: {color: '#2ca02c', lineWidth: 2},  // NDVI in green
+    1: {color: '#d62728', lineWidth: 2}   // EVI in red
+  },
+  legend: {position: 'top'},
+  lineWidth: 1,
+  pointSize: 3,
+  dataOpacity: 0.8
+});
+
+// Print the chart
+print(chart);
+
+// Add map visualization
+var ndviVis = {min: 0, max: 1, palette: ['red', 'yellow', 'green']};
+var eviVis = {min: 0, max: 1, palette: ['red', 'yellow', 'green']};
+
+// Create a composite for visualization
+var composite = modisScaled.median().clip(dhamtari);
+
+Map.centerObject(dhamtari, 10);
+Map.addLayer(composite.select('NDVI'), ndviVis, 'Median NDVI');
+Map.addLayer(composite.select('EVI'), eviVis, 'Median EVI');
+
+
+// Add a note about data scaling
+print('Note: NDVI and EVI values have been scaled by 0.0001 to get actual index values');
